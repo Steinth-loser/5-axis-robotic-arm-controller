@@ -1,0 +1,11 @@
+../Core/Src/stepper.c:13:6:stepper_init	24	static
+../Core/Src/stepper.c:26:6:stepper_enable	16	static
+../Core/Src/stepper.c:30:6:stepper_disable	16	static
+../Core/Src/stepper.c:35:6:stepper_set_direction	16	static
+../Core/Src/stepper.c:46:6:stepper_move_steps	24	static
+../Core/Src/stepper.c:55:13:stepper_calc_timer	40	static
+../Core/Src/stepper.c:75:6:stepper_set_speed	32	static
+../Core/Src/stepper.c:110:6:stepper_move_speed_with_steps	24	static
+../Core/Src/stepper.c:120:6:stepper_move_speed	16	static
+../Core/Src/stepper.c:131:6:stepper_stop	16	static
+../Core/Src/stepper.c:142:6:stepper_pulse_cb	16	static

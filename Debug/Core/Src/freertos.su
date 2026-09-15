@@ -1,0 +1,4 @@
+../Core/Src/freertos.c:99:6:parsePacketTask	72	static
+../Core/Src/freertos.c:125:6:setTimersTask	64	static
+../Core/Src/freertos.c:211:6:MX_FREERTOS_Init	16	static
+../Core/Src/freertos.c:261:6:StartDefaultTask	16	static

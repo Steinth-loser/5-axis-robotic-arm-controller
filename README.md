@@ -1,195 +1,266 @@
-# Model Satellite Flight Control System
+# 5-Axis Robotic Arm Controller
 
-Embedded flight control and telemetry software developed for a model satellite competition using an **STM32F4** microcontroller.
+A real-time control software for a 5-axis robotic arm developed on an **STM32** microcontroller.
 
-The project was developed around a hierarchical state machine to manage the different phases of the mission. The system handles flight-state transitions, altitude-based decisions, landing control, telemetry, recovery operations, and persistent mission state.
+The project uses **FreeRTOS**, message queues, hardware PWM and timer interrupts to receive motor commands and control five stepper motors independently.
 
 ## Overview
 
-The satellite software is organized around the different stages of the mission:
+The controller is based on a simple task-based architecture:
 
 ```text
-Ready to Flight
-       │
-       ▼
-    Rising
-       │
-       ▼
-    Landing
-       │
-       ▼
-    Leaving
-       │
-       ▼
- Payload Landing 1
-       │
-       ▼
-    Hanging
-       │
-       ▼
- Payload Landing 2
-       │
-       ▼
-    Recovery
-       │
-       ▼
-Telemetry Deactivated
+          Motor Commands
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Packet Parser   │
+        │    Task         │
+        └────────┬────────┘
+                 │
+          Message Queue
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Motor Control   │
+        │     Task        │
+        └────────┬────────┘
+                 │
+       ┌─────────┼─────────┐
+       │         │         │
+       ▼         ▼         ▼
+    Motor 0   Motor 1   ... Motor 4
+       │         │           │
+       ▼         ▼           ▼
+    Timer PWM Timer PWM   Timer PWM
 ```
 
-The state machine is implemented using **QP/C**, allowing the system to handle events and transitions without relying on a large blocking control loop.
+The packet parsing and motor control operations run as separate RTOS tasks. Commands are passed between them using a FreeRTOS message queue.
 
 ## Main Features
 
-* STM32F4-based embedded control system
-* Hierarchical state machine using QP/C
-* Event-driven state transitions
-* Mission state persistence using RTC backup registers
-* Periodic altitude calculation
-* Landing control with PID update functions
-* Telemetry packet generation
-* SD card data logging
-* Telemetry transmission
-* Ground command processing
-* Carrier separation control
-* Parachute opening command
-* Recovery buzzer control
-* Timed operations using QP/C time events
+* 5-axis stepper motor control
+* STM32-based embedded system
+* FreeRTOS task-based architecture
+* CMSIS-RTOS API
+* FreeRTOS message queues
+* Hardware PWM for step generation
+* Timer update interrupts for step counting
+* Independent direction control for each motor
+* Variable motor speed control
+* Automatic motor stop when no command is received
+* Reusable stepper motor driver structure
 
-## State Machine
+## RTOS Architecture
 
-The main flight states are implemented as separate state handlers.
+Two main tasks are used by the controller.
 
-Each state is responsible for the actions and events relevant to that part of the mission.
+### Packet Parsing Task
 
-For example, during the rising phase, the system periodically checks the altitude status:
+The packet parsing task waits for incoming messages from the receive queue.
+
+After receiving a packet, it checks the start and end markers:
 
 ```c
-BSP_Height_Stat stat = BSP_calculate_height();
+#define PACKET_START 0x3C3C3C3C
+#define PACKET_END   0x3E3E3E3E
+```
 
-if (stat == LANDING) {
-    return Q_TRAN(&landing);
+If the packet is valid, the five motor speeds are extracted and passed to the motor control task through another message queue.
+
+```c
+osMessageQueuePut(commandQueueHandle, &cmd_msg, 0, 0);
+```
+
+### Motor Control Task
+
+The motor control task waits for a valid motor command.
+
+For each motor, the sign of the speed determines the direction:
+
+```c
+if (speed[0] < 0) {
+    stepper_set_direction(&my_stepper0, false);
+    speed[0] = -speed[0];
+}
+else {
+    stepper_set_direction(&my_stepper0, true);
 }
 ```
 
-The landing state then continues the landing control and checks for the next mission phase.
+The absolute speed value is then passed to the stepper driver.
 
-This structure makes the flight logic easier to follow compared to putting the complete mission sequence inside a single loop.
+```c
+stepper_move_speed(&my_stepper0, speed[0]);
+```
 
-## Hierarchical State Machine
+The same structure is used for all five motors.
 
-Telemetry-related functionality is handled through a super-state:
+## Stepper Driver
+
+The stepper motors are represented using a common `stepper_t` structure.
+
+Each motor keeps its own:
+
+* Enable pin
+* Direction pin
+* Timer handle
+* Remaining step count
+* Moving state
+
+This makes it possible to use the same driver functions for all five motors.
+
+Example initialization:
+
+```c
+stepper_init(&my_stepper0, GPIOE, GPIO_PIN_2, GPIO_PIN_3, &htim2);
+stepper_init(&my_stepper1, GPIOE, GPIO_PIN_4, GPIO_PIN_5, &htim3);
+stepper_init(&my_stepper2, GPIOE, GPIO_PIN_1, GPIO_PIN_0, &htim4);
+```
+
+## Hardware PWM
+
+The step signal is generated using the STM32 timer peripheral rather than manually toggling a GPIO in software.
+
+The timer frequency is calculated according to the requested step speed:
+
+```c
+uint32_t target_freq = (uint32_t) steps_per_sec;
+```
+
+The timer prescaler and auto-reload value are then calculated and applied to the timer.
+
+```c
+__HAL_TIM_SET_PRESCALER(stepper->htim, psc);
+__HAL_TIM_SET_AUTORELOAD(stepper->htim, arr);
+```
+
+A 50% duty cycle is used for the PWM signal:
+
+```c
+__HAL_TIM_SET_COMPARE(
+    stepper->htim,
+    TIM_CHANNEL_1,
+    arr / 2
+);
+```
+
+This approach moves the pulse generation to the timer hardware instead of relying on software delays.
+
+## Step Counting
+
+For movements with a fixed number of steps, the driver keeps track of the remaining steps.
+
+The timer update interrupt is used to count the generated steps:
+
+```c
+if (stepper->remaining_steps > 0) {
+    stepper->remaining_steps--;
+
+    if (stepper->remaining_steps == 0) {
+        stepper_stop(stepper);
+    }
+}
+```
+
+When the requested number of steps has been completed, the PWM output and timer interrupt are stopped.
+
+## Safety / Timeout Behavior
+
+The motor control task waits for new commands with a timeout.
+
+If no command is received within the specified period, all five motors are stopped:
+
+```c
+stepper_stop(&my_stepper0);
+stepper_stop(&my_stepper1);
+stepper_stop(&my_stepper2);
+stepper_stop(&my_stepper3);
+stepper_stop(&my_stepper4);
+```
+
+This prevents the motors from continuing to run indefinitely when command communication is interrupted.
+
+## Motor Control
+
+The controller supports independent speed and direction control for all five axes.
 
 ```text
-                 telemetryActive
-                       │
-       ┌───────────────┼────────────────┐
-       │               │                │
- Ready to Flight     Rising          Landing
-       │               │                │
-       └───────────────┴────────────────┘
-                       │
-                    Leaving
-                       │
-                  Payload States
-                       │
-                    Recovery
+Command
+   │
+   ├── Motor 0 → Direction + Speed
+   ├── Motor 1 → Direction + Speed
+   ├── Motor 2 → Direction + Speed
+   ├── Motor 3 → Direction + Speed
+   └── Motor 4 → Direction + Speed
 ```
 
-States that use the active telemetry functionality return to `telemetryActive` for common event handling.
+Negative speed values are interpreted as reverse direction, while positive values correspond to the opposite direction.
 
-This allows common operations such as telemetry transmission and command processing to be handled separately from flight-state-specific logic.
+## Development Notes
 
-## Persistent Mission State
+The initial step generation approach used software GPIO toggling and delays.
 
-One of the important parts of the system is the use of the STM32 RTC backup register to store the current mission state.
+The control logic was later moved toward a timer-based PWM implementation:
 
-For example:
+```text
+Software GPIO Toggle
+        │
+        ▼
+   HAL_Delay()
+        │
+        ▼
+   CPU-dependent
+   pulse generation
 
-```c
-HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, (uint32_t) 2);
+             ↓
+
+Hardware PWM
+        │
+        ▼
+ STM32 Timer Peripheral
+        │
+        ▼
+ Hardware-generated
+   step pulses
 ```
 
-The saved value is checked during startup:
-
-```c
-uint8_t value = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR0);
-```
-
-The software can then select the appropriate state instead of always starting from the beginning of the mission.
-
-This was useful for keeping track of the mission phase across resets or power interruptions.
-
-## Timed Events
-
-Several operations are controlled using QP/C time events.
-
-Examples include:
-
-* Periodic altitude calculation
-* Periodic telemetry transmission
-* 10-second mission delays
-* Recovery buzzer timing
-
-For example, the recovery state starts a timed buzzer event and a 10-second timer:
-
-```c
-QTimeEvt_armX(&me->tenSecTimeEvt, 10000U, 0U);
-QTimeEvt_armX(&me->buzzTimeEvt, 500U, 500U);
-```
-
-This keeps timing-related operations event-driven instead of using blocking delays.
-
-## Telemetry
-
-While telemetry is active, the system periodically:
-
-1. Creates a telemetry packet
-2. Saves the packet to the SD card
-3. Sends the packet
-
-```c
-BSP_Create_Packet();
-BSP_Save_to_SD();
-BSP_Send_Packet();
-```
-
-Ground commands are also processed through the telemetry state. Depending on the received command, the system can perform actions such as carrier separation or parachute deployment.
-
-## Landing Control
-
-During the landing phases, altitude information is used to determine the next state while the landing controller is updated periodically.
-
-```c
-BSP_Height_Stat stat = BSP_calculate_height();
-
-BSP_PID_Update_landing();
-```
-
-A separate control function is also used for the hanging phase:
-
-```c
-BSP_PID_Update_hanging();
-```
-
-## Competition Result
-
-The project was developed as part of a model satellite competition.
-
-* **CDR Score:** 89.2
-* Reached the stage immediately before the final round
+Using the timer peripheral reduces the amount of CPU work required for continuous pulse generation and makes the motor-control loop more suitable for a real-time RTOS environment.
 
 ## Technologies
 
-* **MCU:** STM32F4
+* **MCU:** STM32
 * **Language:** C
-* **Framework:** QP/C
-* **Control:** PID
-* **Storage:** SD Card
-* **Persistent State:** STM32 RTC Backup Registers
-* **Development Environment:** STM32CubeIDE / STM32 HAL
+* **RTOS:** FreeRTOS
+* **RTOS API:** CMSIS-RTOS
+* **HAL:** STM32 HAL
+* **Motor:** Stepper Motors
+* **Pulse Generation:** Hardware PWM
+* **Communication:** Message Queue based command processing
+* **Timers:** STM32 Hardware Timers
+
+## Project Structure
+
+The main control logic is divided into:
+
+```text
+freertos.c
+    ├── Packet parsing task
+    ├── Motor control task
+    ├── Message queues
+    └── Stepper initialization
+
+stepper.c
+    ├── Stepper initialization
+    ├── Enable / disable
+    ├── Direction control
+    ├── Speed calculation
+    ├── Hardware PWM control
+    └── Step counting
+```
 
 ## My Contribution
 
-I worked on the embedded flight-control software, including the state-machine structure, mission-state handling, timed events, flight-state transitions, and control/telemetry related software.
+I developed the embedded control software for the robotic arm, including the stepper motor driver, FreeRTOS task structure, message queues, motor speed/direction control and timer-based PWM generation.
 
-The main goal was to keep the flight logic separated into manageable states and to avoid blocking operations where an event-driven approach was more suitable.
+The main focus was to build a control structure that could handle five motors while keeping command processing and motor control separated through RTOS tasks.
+

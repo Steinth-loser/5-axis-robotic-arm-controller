@@ -1,158 +1,195 @@
+# Model Satellite Flight Control System
 
-# 5-Axis Robotic Arm Controller
+Embedded flight control and telemetry software developed for a model satellite competition using an **STM32F4** microcontroller.
 
-Embedded control software for a five-axis robotic arm, developed on the STM32F4 microcontroller platform.
+The project was developed around a hierarchical state machine to manage the different phases of the mission. The system handles flight-state transitions, altitude-based decisions, landing control, telemetry, recovery operations, and persistent mission state.
 
-This project focuses on the development of embedded software for controlling a multi-axis robotic arm. It is part of my hands-on work in embedded systems and demonstrates my interest in low-level programming, robotics, and real-time control systems.
+## Overview
 
-## Project Overview
-
-The goal of this project is to develop a software foundation for controlling a five-axis robotic arm using an STM32F4-based embedded system.
-
-The controller is intended to manage the robotic arm's movement through a structured embedded software architecture.
-
-> **Project status:** The repository contains the current implementation. Hardware capabilities, supported control modes, and implemented features should be confirmed against the source code.
-
-## Key Features
-
-- STM32F4-based embedded control software
-- Five-axis robotic arm control
-- Embedded C/C++ development
-- Hardware-level control and peripheral integration
-- Modular firmware development
-
-Additional features will be documented as the implementation is reviewed and verified.
-
-## System Architecture
-
-The software is designed around an embedded controller responsible for coordinating the robotic arm's five axes.
+The satellite software is organized around the different stages of the mission:
 
 ```text
-+-----------------------------+
-|       User Commands         |
-+--------------+--------------+
-               |
-               v
-+-----------------------------+
-|     Control Application     |
-+--------------+--------------+
-               |
-               v
-+-----------------------------+
-|    Embedded Control Layer   |
-+--------------+--------------+
-               |
-               v
-+-----------------------------+
-|        STM32F4 MCU          |
-+--------------+--------------+
-               |
-               v
-+-----------------------------+
-|      Robotic Arm Axes       |
-+-----------------------------+
+Ready to Flight
+       │
+       ▼
+    Rising
+       │
+       ▼
+    Landing
+       │
+       ▼
+    Leaving
+       │
+       ▼
+ Payload Landing 1
+       │
+       ▼
+    Hanging
+       │
+       ▼
+ Payload Landing 2
+       │
+       ▼
+    Recovery
+       │
+       ▼
+Telemetry Deactivated
 ```
 
-The exact control flow, hardware interfaces, and software modules are documented according to the implementation in the repository.
+The state machine is implemented using **QP/C**, allowing the system to handle events and transitions without relying on a large blocking control loop.
 
-## Hardware
+## Main Features
 
-| Component | Description |
-|---|---|
-| Microcontroller | STM32F4 |
-| Robotic mechanism | Five-axis robotic arm |
-| Motor drivers | To be documented |
-| Position feedback | To be documented |
-| Communication interfaces | To be documented |
+* STM32F4-based embedded control system
+* Hierarchical state machine using QP/C
+* Event-driven state transitions
+* Mission state persistence using RTC backup registers
+* Periodic altitude calculation
+* Landing control with PID update functions
+* Telemetry packet generation
+* SD card data logging
+* Telemetry transmission
+* Ground command processing
+* Carrier separation control
+* Parachute opening command
+* Recovery buzzer control
+* Timed operations using QP/C time events
 
-## Software and Tools
+## State Machine
 
-- C / C++
-- STM32F4 microcontroller platform
-- STM32 development environment: **[Add actual toolchain]**
-- Additional libraries and middleware: **[Add if applicable]**
+The main flight states are implemented as separate state handlers.
 
-## Project Structure
+Each state is responsible for the actions and events relevant to that part of the mission.
 
-The project structure below should be updated to match the actual repository:
+For example, during the rising phase, the system periodically checks the altitude status:
+
+```c
+BSP_Height_Stat stat = BSP_calculate_height();
+
+if (stat == LANDING) {
+    return Q_TRAN(&landing);
+}
+```
+
+The landing state then continues the landing control and checks for the next mission phase.
+
+This structure makes the flight logic easier to follow compared to putting the complete mission sequence inside a single loop.
+
+## Hierarchical State Machine
+
+Telemetry-related functionality is handled through a super-state:
 
 ```text
-5-axis-robotic-arm-controller/
-├── Core/
-├── Drivers/
-├── Inc/
-├── Src/
-├── README.md
-└── ...
+                 telemetryActive
+                       │
+       ┌───────────────┼────────────────┐
+       │               │                │
+ Ready to Flight     Rising          Landing
+       │               │                │
+       └───────────────┴────────────────┘
+                       │
+                    Leaving
+                       │
+                  Payload States
+                       │
+                    Recovery
 ```
 
-> Replace this structure with the actual folders and files in the repository before publishing.
+States that use the active telemetry functionality return to `telemetryActive` for common event handling.
 
-## Getting Started
+This allows common operations such as telemetry transmission and command processing to be handled separately from flight-state-specific logic.
 
-### Prerequisites
+## Persistent Mission State
 
-Before building the project, make sure you have:
+One of the important parts of the system is the use of the STM32 RTC backup register to store the current mission state.
 
-- An STM32F4 development board or the target hardware
-- The required STM32 toolchain
-- The appropriate programmer/debugger
-- The hardware required by the robotic arm
+For example:
 
-### Build and Flash
+```c
+HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, (uint32_t) 2);
+```
 
-The exact build and flashing instructions depend on the project's configuration.
+The saved value is checked during startup:
 
-1. Clone the repository:
+```c
+uint8_t value = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR0);
+```
 
-   ```bash
-   git clone https://github.com/Steinth-loser/5-axis-robotic-arm-controller.git
-   ```
+The software can then select the appropriate state instead of always starting from the beginning of the mission.
 
-2. Open the project using the appropriate STM32 development environment.
-3. Configure the target microcontroller and connected hardware.
-4. Build the firmware.
-5. Flash the firmware to the target board.
-6. Test the controller on the robotic arm.
+This was useful for keeping track of the mission phase across resets or power interruptions.
 
-**Note:** The exact project format, build system, and flashing procedure must be confirmed from the repository files.
+## Timed Events
 
-## My Contributions
+Several operations are controlled using QP/C time events.
 
-As a contributor to this project, I worked on the embedded control software for a five-axis robotic arm.
+Examples include:
 
-The following section should be customized to reflect my actual responsibilities:
+* Periodic altitude calculation
+* Periodic telemetry transmission
+* 10-second mission delays
+* Recovery buzzer timing
 
-- Developed embedded control logic for the robotic arm.
-- Implemented and tested **[specific control features]**.
-- Worked with **[specific STM32 peripherals or middleware]**.
-- Contributed to **[software architecture, motor control, communication, or testing]**.
-- Debugged and improved **[specific parts of the system]**.
+For example, the recovery state starts a timed buzzer event and a 10-second timer:
 
-## Engineering Challenges
+```c
+QTimeEvt_armX(&me->tenSecTimeEvt, 10000U, 0U);
+QTimeEvt_armX(&me->buzzTimeEvt, 500U, 500U);
+```
 
-The project provided practical experience with the challenges involved in developing embedded software for a multi-axis robotic system, including coordinating multiple axes, managing hardware interfaces, and developing reliable control logic.
+This keeps timing-related operations event-driven instead of using blocking delays.
 
-Specific engineering challenges and solutions will be documented based on the implementation.
+## Telemetry
 
-## Future Improvements
+While telemetry is active, the system periodically:
 
-Potential future improvements include:
+1. Creates a telemetry packet
+2. Saves the packet to the SD card
+3. Sends the packet
 
-- More comprehensive hardware documentation
-- Improved test coverage
-- Additional control modes
-- More detailed system diagnostics
-- Performance and timing analysis
-- Improved documentation of the control architecture
+```c
+BSP_Create_Packet();
+BSP_Save_to_SD();
+BSP_Send_Packet();
+```
 
-## Author
+Ground commands are also processed through the telemetry state. Depending on the received command, the system can perform actions such as carrier separation or parachute deployment.
 
-**Steinth-loser**
+## Landing Control
 
-Electrical and Electronics Engineering Student  
-Interests: Embedded Systems, Robotics, IoT, and Edge AI
+During the landing phases, altitude information is used to determine the next state while the landing controller is updated periodically.
 
-## License
+```c
+BSP_Height_Stat stat = BSP_calculate_height();
 
-[Add the appropriate license if applicable.]
+BSP_PID_Update_landing();
+```
+
+A separate control function is also used for the hanging phase:
+
+```c
+BSP_PID_Update_hanging();
+```
+
+## Competition Result
+
+The project was developed as part of a model satellite competition.
+
+* **CDR Score:** 89.2
+* Reached the stage immediately before the final round
+
+## Technologies
+
+* **MCU:** STM32F4
+* **Language:** C
+* **Framework:** QP/C
+* **Control:** PID
+* **Storage:** SD Card
+* **Persistent State:** STM32 RTC Backup Registers
+* **Development Environment:** STM32CubeIDE / STM32 HAL
+
+## My Contribution
+
+I worked on the embedded flight-control software, including the state-machine structure, mission-state handling, timed events, flight-state transitions, and control/telemetry related software.
+
+The main goal was to keep the flight logic separated into manageable states and to avoid blocking operations where an event-driven approach was more suitable.
